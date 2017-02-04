@@ -1,0 +1,112 @@
+#
+# \brief  Test for the SSH terminal (based on test for TCP terminal)
+# \author Norman Feske
+# \date   2011-09-08
+#
+
+# Build
+#
+
+set build_components {
+	core init
+	drivers/timer drivers/nic
+	server/ssh_terminal
+	test/terminal_echo
+}
+
+source ${genode_dir}/repos/base/run/platform_drv.inc
+append_platform_drv_build_components
+
+build $build_components
+
+create_boot_directory
+
+#
+# Generate config
+#
+
+set config {
+<config verbose="yes">
+	<parent-provides>
+		<service name="ROM"/>
+		<service name="RAM"/>
+		<service name="IRQ"/>
+		<service name="IO_MEM"/>
+		<service name="IO_PORT"/>
+		<service name="PD"/>
+		<service name="RM"/>
+		<service name="CPU"/>
+		<service name="LOG"/>
+	</parent-provides>
+	<default-route>
+		<any-service> <parent/> <any-child/> </any-service>
+	</default-route>
+	<start name="timer">
+		<resource name="RAM" quantum="1M"/>
+		<provides> <service name="Timer"/> </provides>
+	</start>
+	<start name="nic_drv">
+		<resource name="RAM" quantum="4M"/>
+		<provides> <service name="Nic"/> </provides>
+	</start>
+	<start name="ssh_terminal">
+		<resource name="RAM" quantum="2560K"/>
+		<provides> <service name="Terminal"/> </provides>
+		<config>
+			<policy label_prefix="test-terminal_echo" port="8888"/>
+			<libc ip_addr="10.0.2.55" netmask="255.255.255.0" gateway="10.0.2.1"
+				stdout="/dev/log" stderr="/dev/log">
+				<vfs> <dir name="dev"> <log/> </dir> </vfs>
+			</libc>
+		</config>
+	</start>
+	<start name="test-terminal_echo">
+		<resource name="RAM" quantum="1M"/>
+	</start>}
+
+append_platform_drv_config
+
+append config {
+</config>
+}
+
+install_config $config
+
+#
+# Boot modules
+#
+
+# generic modules
+set boot_modules {
+	core ld.lib.so init timer
+	nic_drv
+	libc.lib.so libm.lib.so lwip.lib.so libc_pipe.lib.so
+	libcrypto.lib.so libssh.lib.so zlib.lib.so
+	ssh_terminal
+	test-terminal_echo
+}
+
+# platform-specific modules
+append_platform_drv_boot_modules
+
+build_boot_image $boot_modules
+
+#
+# Execute test
+#
+
+# qemu config
+append qemu_args " -m 128 -nographic "
+
+append_if [have_spec x86]     qemu_args " -net nic,model=e1000 "
+append_if [have_spec lan9118] qemu_args " -net nic,model=lan9118 "
+
+append qemu_args " -net user -redir tcp:5555::8888 "
+
+run_genode_until forever
+
+#
+# Now, connect via 'telnet localhost 5555'
+#
+
+# vi: set ft=tcl :
