@@ -32,6 +32,11 @@
 #include <netinet/in.h>
 #include <sys/ioctl.h>
 
+/* libssh API */
+#include <libssh/libssh.h>
+#include <libssh/server.h>
+#include <libssh/callbacks.h>
+
 static bool const verbose = true;
 
 
@@ -404,7 +409,9 @@ namespace Terminal {
 			:
 				Open_socket(tcp_port),
 				_io_buffer(Genode::env()->ram_session(), io_buffer_size)
-			{ }
+			{
+				Genode::log("created terminal session on port ", tcp_port);
+			}
 
 			/********************************
 			 ** Terminal session interface **
@@ -414,11 +421,13 @@ namespace Terminal {
 
 			bool avail()
 			{
+				Genode::log("checking avail() on terminal session");
 				return !read_buffer_empty();
 			}
 
 			Genode::size_t _read(Genode::size_t dst_len)
 			{
+				Genode::log("checking read() on terminal session");
 				Genode::size_t num_bytes =
 					read_buffer(_io_buffer.local_addr<char>(),
 					            Genode::min(_io_buffer.size(), dst_len));
@@ -458,11 +467,13 @@ namespace Terminal {
 
 			void read_avail_sigh(Genode::Signal_context_capability sigh)
 			{
+				Genode::log("setting read_avail_sigh on terminal session");
 				Open_socket::read_avail_sigh(sigh);
 			}
 
 			void connected_sigh(Genode::Signal_context_capability sigh)
 			{
+				Genode::log("setting connected_sigh on terminal session");
 				Open_socket::connected_sigh(sigh);
 			}
 
@@ -477,6 +488,7 @@ namespace Terminal {
 
 			Session_component *_create_session(const char *args)
 			{
+				Genode::log(" creating session for <", args, ">");
 				using namespace Genode;
 
 				/*
@@ -520,23 +532,29 @@ int main()
 {
 	using namespace Genode;
 
-	Genode::log("--- TCP terminal started ---");
+	Genode::log("--- TCP terminal started 1 ---");
 
 	/* initialize entry point that serves the root interface */
 	enum { STACK_SIZE = 4*4096 };
 	static Cap_connection cap;
-	static Rpc_entrypoint ep(&cap, STACK_SIZE, "terminal_ep");
+	Genode::log("--- TCP terminal started 2 ---");
+	Rpc_entrypoint ep(&cap, STACK_SIZE, "terminal_ep");
 
-	static Sliced_heap sliced_heap(env()->ram_session(), env()->rm_session());
+	Genode::log("--- TCP terminal started 3 ---");
+	Sliced_heap sliced_heap(env()->ram_session(), env()->rm_session());
 
 	/* create root interface for service */
-	static Terminal::Root_component root(&ep, &sliced_heap);
+	Genode::log("--- TCP terminal started 4 ---");
+	Terminal::Root_component root(&ep, &sliced_heap);
 
 	/* announce service at our parent */
+	Genode::log("--- TCP terminal started 5 ---");
 	env()->parent()->announce(ep.manage(&root));
 
+	Genode::log("--- TCP terminal started 6 ---");
 	for (;;)
 		open_socket_pool()->watch_sockets_for_incoming_data();
 
+	Genode::log("--- TCP terminal started 7 ---");
 	return 0;
 }
