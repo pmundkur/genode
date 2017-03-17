@@ -19,9 +19,11 @@
 #include <base/heap.h>
 #include <root/component.h>
 #include <terminal_session/terminal_session.h>
-#include <cap_session/connection.h>
 #include <base/attached_ram_dataspace.h>
 #include <os/session_policy.h>
+
+#include <libc/component.h>
+#include <pthread.h>
 
 /* socket API */
 #include <unistd.h>
@@ -212,7 +214,7 @@ class Open_socket : public Genode::List<Open_socket>::Element
 		Genode::size_t read_buffer(char *dst, Genode::size_t dst_len)
 		{
 			Genode::size_t num_bytes = Genode::min(dst_len, _read_buf_bytes_used -
-			                                       _read_buf_bytes_read);
+							       _read_buf_bytes_read);
 			Genode::memcpy(dst, _read_buf + _read_buf_bytes_read, num_bytes);
 
 			_read_buf_bytes_read += num_bytes;
@@ -248,6 +250,11 @@ class Open_socket_pool
 		Genode::List<Open_socket> _list;
 
 		/**
+		 * Thread doing the select
+		 */
+		pthread_t _select;
+
+		/**
 		 * Number of currently open sockets
 		 */
 		int _count;
@@ -266,11 +273,27 @@ class Open_socket_pool
 			::write(sync_pipe_fds[1], &c, sizeof(c));
 		}
 
+		static void * entry(void *arg) {
+			Open_socket_pool * pool = reinterpret_cast<Open_socket_pool *>(arg);
+
+			for (;;)
+				pool->watch_sockets_for_incoming_data();
+
+			return nullptr;
+		}
+
 	public:
 
-		Open_socket_pool() : _count(0)
+		Open_socket_pool(Genode::Env &env)
+		: _count(0)
 		{
 			pipe(sync_pipe_fds);
+
+			if (pthread_create(&_select, nullptr, entry, this)) {
+				class Startup_select_thread_failed : Genode::Exception { };
+				throw Startup_select_thread_failed();
+			}
+
 		}
 
 		void insert(Open_socket *s)
@@ -371,9 +394,9 @@ class Open_socket_pool
 };
 
 
-Open_socket_pool *open_socket_pool()
+Open_socket_pool *open_socket_pool(Genode::Env * env = nullptr)
 {
-	static Open_socket_pool inst;
+	static Open_socket_pool inst(*env);
 	return &inst;
 }
 
@@ -395,166 +418,167 @@ Open_socket::~Open_socket()
 
 
 namespace Terminal {
+	class Session_component;
+	class Root_component;
+};
 
-	class Session_component : public Genode::Rpc_object<Session, Session_component>,
-	                          public Open_socket
-	{
-		private:
-
-			Genode::Attached_ram_dataspace _io_buffer;
-
-		public:
-
-			Session_component(Genode::size_t io_buffer_size, int tcp_port)
-			:
-				Open_socket(tcp_port),
-				_io_buffer(Genode::env()->ram_session(), io_buffer_size)
-			{
-				Genode::log("created terminal session on port ", tcp_port);
-			}
-
-			/********************************
-			 ** Terminal session interface **
-			 ********************************/
-
-			Size size() { return Size(0, 0); }
-
-			bool avail()
-			{
-				Genode::log("checking avail() on terminal session");
-				return !read_buffer_empty();
-			}
-
-			Genode::size_t _read(Genode::size_t dst_len)
-			{
-				Genode::log("checking read() on terminal session");
-				Genode::size_t num_bytes =
-					read_buffer(_io_buffer.local_addr<char>(),
-					            Genode::min(_io_buffer.size(), dst_len));
-
-				/*
-				 * If read buffer was in use, look if more data is buffered in
-				 * the TCP/IP stack.
-				 */
-				if (num_bytes)
-					open_socket_pool()->update_sockets_to_watch();
-
-				return num_bytes;
-			}
-
-			Genode::size_t _write(Genode::size_t num_bytes)
-			{
-				/* sanitize argument */
-				num_bytes = Genode::min(num_bytes, _io_buffer.size());
-
-				/* write data to socket, assuming that it won't block */
-				ssize_t written_bytes = ::write(sd(),
-				                                _io_buffer.local_addr<char>(),
-				                                num_bytes);
-
-				if (written_bytes < 0) {
-					Genode::error("write error, dropping data");
-					return 0;
-				}
-
-				return written_bytes;
-			}
-
-			Genode::Dataspace_capability _dataspace()
-			{
-				return _io_buffer.cap();
-			}
-
-			void read_avail_sigh(Genode::Signal_context_capability sigh)
-			{
-				Genode::log("setting read_avail_sigh on terminal session");
-				Open_socket::read_avail_sigh(sigh);
-			}
-
-			void connected_sigh(Genode::Signal_context_capability sigh)
-			{
-				Genode::log("setting connected_sigh on terminal session");
-				Open_socket::connected_sigh(sigh);
-			}
-
-			Genode::size_t read(void *buf, Genode::size_t) { return 0; }
-			Genode::size_t write(void const *buf, Genode::size_t) { return 0; }
-	};
-
-
-	class Root_component : public Genode::Root_component<Session_component>
-	{
-		protected:
-
-			Session_component *_create_session(const char *args)
-			{
-				Genode::log(" creating session for <", args, ">");
-				using namespace Genode;
-
-				/*
-				 * XXX read I/O buffer size from args
-				 */
-				Genode::size_t io_buffer_size = 4096;
-
-				try {
-					Session_label const label = label_from_args(args);
-					Session_policy policy(label);
-
-					unsigned tcp_port = 0;
-					policy.attribute("port").value(&tcp_port);
-					return new (md_alloc())
-					       Session_component(io_buffer_size, tcp_port);
-
-				} catch (Xml_node::Nonexistent_attribute) {
-					error("Missing \"port\" attribute in policy definition");
-					throw Root::Unavailable();
-				} catch (Session_policy::No_policy_defined) {
-					error("Invalid session request, no matching policy");
-					throw Root::Unavailable();
-				}
-			}
-
-		public:
-
-			/**
-			 * Constructor
-			 */
-			Root_component(Genode::Rpc_entrypoint *ep,
-			               Genode::Allocator      *md_alloc)
-			:
-				Genode::Root_component<Session_component>(ep, md_alloc)
-			{ }
-	};
-}
-
-
-int main()
+class Terminal::Session_component : public Genode::Rpc_object<Session, Session_component>,
+				    public Open_socket
 {
-	using namespace Genode;
+	private:
 
-	Genode::log("--- TCP terminal started 1 ---");
+		Genode::Attached_ram_dataspace _io_buffer;
 
-	/* initialize entry point that serves the root interface */
-	enum { STACK_SIZE = 4*4096 };
-	static Cap_connection cap;
-	Genode::log("--- TCP terminal started 2 ---");
-	Rpc_entrypoint ep(&cap, STACK_SIZE, "terminal_ep");
+	public:
 
-	Genode::log("--- TCP terminal started 3 ---");
-	Sliced_heap sliced_heap(env()->ram_session(), env()->rm_session());
+		Session_component(Genode::Env &env, Genode::size_t io_buffer_size, int tcp_port)
+		:
+			Open_socket(tcp_port),
+			_io_buffer(env.ram(), env.rm(), io_buffer_size)
+		{
+			Genode::log("created terminal session on port ", tcp_port);
+		}
+
+		/********************************
+		 ** Terminal session interface **
+		 ********************************/
+
+		Size size() { return Size(0, 0); }
+
+		bool avail()
+		{
+			Genode::log("checking avail() on terminal session");
+			return !read_buffer_empty();
+		}
+
+		Genode::size_t _read(Genode::size_t dst_len)
+		{
+			Genode::log("checking read() on terminal session");
+			Genode::size_t num_bytes =
+				read_buffer(_io_buffer.local_addr<char>(),
+					    Genode::min(_io_buffer.size(), dst_len));
+
+			/*
+			 * If read buffer was in use, look if more data is buffered in
+			 * the TCP/IP stack.
+			 */
+			if (num_bytes)
+				open_socket_pool()->update_sockets_to_watch();
+
+			return num_bytes;
+		}
+
+		Genode::size_t _write(Genode::size_t num_bytes)
+		{
+			/* sanitize argument */
+			num_bytes = Genode::min(num_bytes, _io_buffer.size());
+
+			/* write data to socket, assuming that it won't block */
+			ssize_t written_bytes = ::write(sd(),
+							_io_buffer.local_addr<char>(),
+							num_bytes);
+
+			if (written_bytes < 0) {
+				Genode::error("write error, dropping data");
+				return 0;
+			}
+
+			return written_bytes;
+		}
+
+		Genode::Dataspace_capability _dataspace()
+		{
+			return _io_buffer.cap();
+		}
+
+		void read_avail_sigh(Genode::Signal_context_capability sigh)
+		{
+			Genode::log("setting read_avail_sigh on terminal session");
+			Open_socket::read_avail_sigh(sigh);
+		}
+
+		void connected_sigh(Genode::Signal_context_capability sigh)
+		{
+			Genode::log("setting connected_sigh on terminal session");
+			Open_socket::connected_sigh(sigh);
+		}
+
+		Genode::size_t read(void *buf, Genode::size_t) { return 0; }
+		Genode::size_t write(void const *buf, Genode::size_t) { return 0; }
+};
+
+
+class Terminal::Root_component : public Genode::Root_component<Session_component>
+{
+	private:
+
+		Genode::Env &_env;
+
+	protected:
+
+		Session_component *_create_session(const char *args)
+		{
+			using namespace Genode;
+
+			/*
+			 * XXX read I/O buffer size from args
+			 */
+			Genode::size_t io_buffer_size = 4096;
+
+			try {
+				Session_label const label = label_from_args(args);
+				Session_policy policy(label);
+
+				unsigned tcp_port = 0;
+				policy.attribute("port").value(&tcp_port);
+				Genode::log(" creating session for <", args, "> on port ", tcp_port);
+				return new (md_alloc())
+					Session_component(_env, io_buffer_size, tcp_port);
+
+			} catch (Xml_node::Nonexistent_attribute) {
+				error("Missing \"port\" attribute in policy definition");
+				throw Root::Unavailable();
+			} catch (Session_policy::No_policy_defined) {
+				error("Invalid session request, no matching policy");
+				throw Root::Unavailable();
+			}
+		}
+
+	public:
+
+		/**
+		 * Constructor
+		 */
+		Root_component(Genode::Env &env, Genode::Allocator &md_alloc)
+		:
+			Genode::Root_component<Session_component>(&env.ep().rpc_ep(),
+								  &md_alloc),
+			_env(env)
+		{ }
+};
+
+
+struct Main
+{
+	Genode::Env &_env;
+
+	Genode::Sliced_heap _sliced_heap { _env.ram(), _env.rm() };
 
 	/* create root interface for service */
-	Genode::log("--- TCP terminal started 4 ---");
-	Terminal::Root_component root(&ep, &sliced_heap);
+	Terminal::Root_component _root { _env, _sliced_heap };
 
-	/* announce service at our parent */
-	Genode::log("--- TCP terminal started 5 ---");
-	env()->parent()->announce(ep.manage(&root));
+	Main(Genode::Env &env) : _env(env)
+	{
+		Genode::log("--- TCP terminal started ---");
 
-	Genode::log("--- TCP terminal started 6 ---");
-	for (;;)
-		open_socket_pool()->watch_sockets_for_incoming_data();
+		/* start thread blocking in select */
+		open_socket_pool(&_env);
 
-	Genode::log("--- TCP terminal started 7 ---");
-	return 0;
-}
+		/* announce service at our parent */
+		Genode::log("--- announcing TCP terminal ---");
+		_env.parent().announce(env.ep().manage(_root));
+
+	}
+};
+
+void Libc::Component::construct(Libc::Env &env) { static Main main(env); }
