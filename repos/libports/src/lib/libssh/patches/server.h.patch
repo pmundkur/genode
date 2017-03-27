@@ -1,0 +1,30 @@
+--- a/include/libssh/server.h	2017-02-03 16:16:56.318409354 -0800
++++ b/include/libssh/server.h	2017-03-26 15:39:29.142267384 -0700
+@@ -187,6 +187,27 @@
+ LIBSSH_API int ssh_handle_key_exchange(ssh_session session);
+ 
+ /**
++ * @brief Register for non-blocking accepts of incoming ssh connections
++ *
++ * @param  ssh_bind_o     The ssh server bind to accept a connection.
++ * @param  event                       A non-blocking event mainloop
++ * @see ssh_bind_accept
++ * @return SSH_OK when successfully registered
++ */
++LIBSSH_API int ssh_event_add_bind(ssh_event event, ssh_bind ssh_bind_o);
++
++/**
++ * @brief Remove bind from the event
++ *
++ * @param  ssh_bind_o     The ssh server bind to accept a connection.
++ * @param  event                       A non-blocking event mainloop
++ * @see ssh_bind_accept
++ * @return SSH_OK when successfully registered
++ */
++LIBSSH_API int ssh_event_remove_bind(ssh_event event, ssh_bind ssh_bind_o);
++
++
++/**
+  * @brief Free a ssh servers bind.
+  *
+  * @param  ssh_bind_o     The ssh server bind to free.

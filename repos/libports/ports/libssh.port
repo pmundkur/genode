@@ -6,5 +6,9 @@ URL(libssh) := https://git.libssh.org/projects/libssh.git
 REV(libssh) := e0fa48d2eded21ddc48502f6b4eb40ed2a4be2ce
 DIR(libssh) := src/lib/libssh
 
+PATCHES    := $(foreach P,$(shell cat $(REP_DIR)/src/lib/libssh/patches/series),\
+                src/lib/libssh/patches/$P)
+PATCH_OPT := -p1 -d src/lib/libssh
+
 DIRS := include
 DIR_CONTENT(include) := src/lib/libssh/include/libssh
