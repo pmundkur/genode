@@ -9,7 +9,10 @@
 
 set build_components {
 	core init
-	drivers/timer drivers/nic
+	drivers/timer
+	drivers/nic
+	drivers/rtc
+	lib/vfs/jitterentropy
 	server/ssh_terminal
 	test/terminal_echo
 }
@@ -49,6 +52,10 @@ set config {
 		<resource name="RAM" quantum="4M"/>
 		<provides> <service name="Nic"/> </provides>
 	</start>
+	<start name="rtc_drv">
+		<resource name="RAM" quantum="1M"/>
+		<provides> <service name="Rtc"/> </provides>
+	</start>
 	<start name="ssh_terminal">
 		<resource name="RAM" quantum="8M"/>
 		<provides> <service name="Terminal"/> </provides>
@@ -61,15 +68,20 @@ set config {
 				rsa_key="/etc/ssh/rsa_key"
 			/>
 			<vfs>
-				<dir name="dev"> <log/> </dir>
-                                <dir name="etc">
+				<dir name="dev">
+					<log/>
+					<jitterentropy name="random"/>
+					<jitterentropy name="urandom"/>
+					<rtc/>
+				</dir>
+				<dir name="etc">
 					<dir name="ssh">
 						<rom name="dsa_key"/>
 						<rom name="rsa_key"/>
 					</dir>
 				</dir>
 			</vfs>
-			<libc	ip_addr="10.0.2.55" netmask="255.255.255.0" gateway="10.0.2.1"
+			<libc   ip_addr="10.0.2.55" netmask="255.255.255.0" gateway="10.0.2.1"
 				stdout="/dev/log" stderr="/dev/log">
 			</libc>
 		</config>
@@ -92,10 +104,11 @@ install_config $config
 
 # generic modules
 set boot_modules {
-	core ld.lib.so init timer
-	nic_drv
+	core ld.lib.so init
+	timer nic_drv rtc_drv
 	libc.lib.so pthread.lib.so libm.lib.so lwip.lib.so libc_pipe.lib.so
 	libcrypto.lib.so libssh.lib.so zlib.lib.so
+	vfs_jitterentropy.lib.so
 	ssh_terminal dsa_key rsa_key
 	test-terminal_echo
 }
