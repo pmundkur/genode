@@ -434,9 +434,15 @@ static int channel_pty_request_callback(ssh_session session, ssh_channel channel
 					int cols, int rows, int py, int px,
 					void *userdata)
 {
-	Genode::log(__func__, ": ", term);
-	/* TODO: send connected signal? */
-	return SSH_OK;
+	struct callback_data *d = reinterpret_cast<callback_data *>(userdata);
+
+	if (d->connected_sigh.valid()) {
+		Genode::log(__func__, ": connecting request for ", term);
+		Genode::Signal_transmitter(d->connected_sigh).submit();
+		return SSH_OK;
+	}
+	Genode::log(__func__, ": cannot connect request for ", term);
+	return SSH_ERROR;
 }
 
 static int channel_pty_resize_callback(ssh_session session, ssh_channel channel,
