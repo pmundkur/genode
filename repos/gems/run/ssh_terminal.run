@@ -14,13 +14,34 @@ set build_components {
 	drivers/rtc
 	lib/vfs/jitterentropy
 	server/ssh_terminal
-	test/terminal_echo
+	test/libports/ncurses
+	lib/libc_noux
+	noux/minimal
+	noux-pkg/coreutils
+	noux-pkg/vim
+	noux-pkg/bash
 }
 
 source ${genode_dir}/repos/base/run/platform_drv.inc
 append_platform_drv_build_components
 
 build $build_components
+
+# from: https://github.com/genodelabs/genode/issues/1907
+# write default vimrc file
+set vimrc_fd [open "bin/vim/share/vim/vimrc" w]
+puts $vimrc_fd {
+set noloadplugins
+set hls
+set nocompatible
+set laststatus=2
+set noswapfile
+set viminfo=}
+close $vimrc_fd
+
+exec tar cfv bin/bash.tar      -h -C bin/bash .
+exec tar cfv bin/coreutils.tar -h -C bin/coreutils .
+exec tar cfv bin/vim.tar       -h -C bin/vim .
 
 create_boot_directory
 
@@ -60,7 +81,7 @@ set config {
 		<resource name="RAM" quantum="8M"/>
 		<provides> <service name="Terminal"/> </provides>
 		<config>
-			<policy label_prefix="test-terminal_echo"
+			<policy label="noux -> "
 				port="8888"
 				user="myuser"
 				password="mypassword"
@@ -86,9 +107,20 @@ set config {
 			</libc>
 		</config>
 	</start>
-	<start name="test-terminal_echo">
-		<resource name="RAM" quantum="1M"/>
-	</start>}
+	<start name="noux">
+		<resource name="RAM" quantum="1G"/>
+		<config verbose="yes">
+			<fstab>
+				<tar name="coreutils.tar" />
+				<tar name="vim.tar" />
+				<tar name="bash.tar" />
+			</fstab>
+			<start name="/bin/bash">
+				<env name="TERM" value="linux" />
+			</start>
+		</config>
+	</start>
+}
 
 append_platform_drv_config
 
@@ -107,10 +139,12 @@ set boot_modules {
 	core ld.lib.so init
 	timer nic_drv rtc_drv
 	libc.lib.so pthread.lib.so libm.lib.so lwip.lib.so libc_pipe.lib.so
-	libcrypto.lib.so libssh.lib.so zlib.lib.so
+	libc_lock_pipe.lib.so libc_noux.lib.so
+	libcrypto.lib.so libssh.lib.so zlib.lib.so ncurses.lib.so
 	vfs_jitterentropy.lib.so
 	ssh_terminal dsa_key rsa_key
-	test-terminal_echo
+	noux
+	coreutils.tar vim.tar bash.tar
 }
 
 # platform-specific modules
