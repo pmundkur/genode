@@ -57,10 +57,11 @@ struct channel_callback_data {
 	/**
 	 * Buffer for incoming data
 	 *
-	 * This buffer is used for synchronizing the reception of data in the
-	 * main thread ('watch_sockets_for_incoming_data') and the entrypoint
-	 * thread ('read'). The main thread fills the buffer if its not already
-	 * occupied and the entrypoint thread consumes the buffer.
+	 * This buffer is used for synchronizing the reception of data
+	 * in the main thread ('loop') and the entrypoint thread
+	 * ('read_buffer'). The main thread fills the buffer if its not
+	 * already occupied and the entrypoint thread consumes the
+	 * buffer.
 	 *
 	 * If remote data arrives from libssh via the
 	 * channel_data_callback while the buffer is occupied, it is
@@ -82,8 +83,9 @@ struct channel_callback_data {
 	 * libssh structures being used by the main thread
 	 * ('watch_sockets_for_incoming_data').
 	 *
-	 * The entrypoint thread fills the buffer if its not already
-	 * occupied and the main thread consumes the buffer.
+	 * The entrypoint thread fills the buffer and the main thread
+	 * consumes the buffer.  They protect against concurrent
+	 * access using a lock.
 	 *
 	 * When the buffer is written to from the entrypoint thread,
 	 * the connection gets put on a list; this list is monitored
@@ -95,6 +97,7 @@ struct channel_callback_data {
 	char           write_buf[WRITE_BUF_SIZE];
 	Genode::size_t write_buf_bytes_used;
 	Genode::size_t write_buf_bytes_sent;
+	Genode::Lock   write_lock;
 
 	channel_callback_data()
 	:
@@ -268,12 +271,19 @@ struct callback_data
 	bool read_buffer_empty() const { return cdata.read_buf_bytes_used == 0; }
 
 	/**
+	 * Return true if the internal write buffer is fully drained
+	 */
+	bool send_buffer_empty() const { return cdata.write_buf_bytes_used == 0; }
+
+	/**
 	 * Drain the outgoing buffered data, and return the number of
 	 * bytes remaining to be drained.  This is called from the
 	 * main thread.
 	 */
 	Genode::size_t drain_buffer()
 	{
+		Genode::Lock(cdata.write_lock);
+
 		int num_bytes = ssh_channel_write(channel,
 						  cdata.write_buf + cdata.write_buf_bytes_sent,
 						  cdata.write_buf_bytes_used - cdata.write_buf_bytes_sent);
@@ -297,11 +307,12 @@ struct callback_data
 	 */
 	Genode::size_t read_buffer(char *dst, Genode::size_t dst_len)
 	{
+		if (cdata.read_buf_bytes_used == 0) return 0;
+
 		Genode::size_t num_bytes = Genode::min(dst_len,
 						       cdata.read_buf_bytes_used -
 						       cdata.read_buf_bytes_read);
 		Genode::memcpy(dst, cdata.read_buf + cdata.read_buf_bytes_read, num_bytes);
-
 		cdata.read_buf_bytes_read += num_bytes;
 		if (cdata.read_buf_bytes_read >= cdata.read_buf_bytes_used)
 			cdata.read_buf_bytes_used = cdata.read_buf_bytes_read = 0;
@@ -315,16 +326,16 @@ struct callback_data
 
 	/**
 	 * Buffer data that needs to be sent by the main thread,
-	 * provided we have an empty buffer, and return the number of
-	 * bytes buffered.
+	 * and return the number of bytes buffered.
 	 */
 	Genode::size_t send_buffer(const char *src, Genode::size_t src_len)
 	{
-		if (cdata.write_buf_bytes_used > 0) return 0;
+		Genode::Lock(cdata.write_lock);
 
-		Genode::size_t num_bytes = Genode::min(src_len, sizeof(cdata.write_buf));
-		Genode::memcpy(cdata.write_buf, src, num_bytes);
-		cdata.write_buf_bytes_used = num_bytes;
+		Genode::size_t num_bytes = Genode::min(src_len,
+						       sizeof(cdata.write_buf) - cdata.write_buf_bytes_used);
+		Genode::memcpy(cdata.write_buf + cdata.write_buf_bytes_used, src, num_bytes);
+		cdata.write_buf_bytes_used += num_bytes;
 		return num_bytes;
 	}
  };
@@ -340,7 +351,6 @@ struct callback_data
 static int channel_data_callback(ssh_session session, ssh_channel channel, void *data,
 				 uint32_t len, int is_stderr, void *userdata)
 {
-	Genode::log(__func__);
 	struct callback_data *d = reinterpret_cast<callback_data *>(userdata);
 	struct channel_callback_data *cdata = &d->cdata;
 
@@ -349,9 +359,9 @@ static int channel_data_callback(ssh_session session, ssh_channel channel, void 
 	/*
 	 * compute what fits into our buffer, and copy it in
 	 */
-	cdata->read_buf_bytes_used = Genode::min(len, sizeof(cdata->read_buf));
-	Genode::memcpy(cdata->read_buf, (char *)data, cdata->read_buf_bytes_used);
-
+	int bytes_used = Genode::min(len, sizeof(cdata->read_buf));
+	Genode::memcpy(cdata->read_buf, (char *)data, bytes_used);
+	cdata->read_buf_bytes_used += bytes_used;
 	/*
 	 * notify client about bytes available for reading
 	 */
@@ -364,7 +374,7 @@ static int channel_data_callback(ssh_session session, ssh_channel channel, void 
 	 * callbacks from the event-loop.
 	 */
 
-	return cdata->read_buf_bytes_used;
+	return bytes_used;
 }
 
 static void channel_eof_callback(ssh_session session, ssh_channel channel,
@@ -616,7 +626,7 @@ class Ssh_conn
 		/**
 		 * Return true if the internal read buffer is ready to receive data
 		 */
-	bool read_buffer_empty() const { return conn.read_buffer_empty(); }
+		bool read_buffer_empty() const { return conn.read_buffer_empty(); }
 
 		/**
 		 * Read out internal read buffer and copy into
@@ -752,7 +762,8 @@ class Ssh_conn_pool
 				conn = curr->object();
 				switch (conn->state) {
 				case callback_data::ACTIVE:
-					conn->drain_buffer();
+					if (!conn->send_buffer_empty())
+						conn->drain_buffer();
 					break;
 
 				case callback_data::DETACH:
@@ -874,13 +885,11 @@ class Terminal::Session_component : public Genode::Rpc_object<Session, Session_c
 
 		bool avail()
 		{
-			Genode::log("checking avail() on terminal session");
 			return !read_buffer_empty();
 		}
 
 		Genode::size_t _read(Genode::size_t dst_len)
 		{
-			Genode::log("checking read() on terminal session");
 			Genode::size_t num_bytes =
 				read_buffer(_io_buffer.local_addr<char>(),
 					    Genode::min(_io_buffer.size(), dst_len));
